@@ -3,35 +3,50 @@ import pdfplumber
 import pandas as pd
 import io
 import re
+from datetime import datetime
 
 # =========================
-# CONFIG STREAMLIT
+# CONFIG UI
 # =========================
-st.set_page_config(layout="wide")
-st.title("📄 Extrator Inteligente de Tabelas de PDFs")
-st.write("Upload do PDF → Extração → Excel pronto")
+st.set_page_config(
+    page_title="Extrator de PDFs",
+    page_icon="📄",
+    layout="wide"
+)
+
+st.markdown("""
+    <style>
+        .main {
+            background-color: #0e1117;
+        }
+        .stButton>button {
+            background-color: #00c8ff;
+            color: black;
+            border-radius: 10px;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("📄 Extrator Inteligente de Tabelas")
+st.caption("Upload → Extração → Excel em segundos")
 
 # =========================
-# FUNÇÃO: CORRIGIR COLUNAS (ROBUSTA)
+# HISTÓRICO
+# =========================
+if "historico" not in st.session_state:
+    st.session_state.historico = []
+
+# =========================
+# FUNÇÕES
 # =========================
 def corrigir_colunas(df):
     novas_cols = []
-
     for i, col in enumerate(df.columns):
-        nome = str(col).strip()
+        nome = str(col).strip().replace("\n", " ")
 
-        # remove quebra de linha
-        nome = nome.replace("\n", " ")
-
-        # remove nomes absurdos (títulos grandes)
-        if len(nome) > 40:
+        if len(nome) > 40 or nome == "" or nome.lower() == "none":
             nome = f"col_{i}"
 
-        # vazio ou None
-        if nome == "" or nome.lower() == "none":
-            nome = f"col_{i}"
-
-        # evitar duplicados
         if nome in novas_cols:
             nome = f"{nome}_{i}"
 
@@ -40,9 +55,7 @@ def corrigir_colunas(df):
     df.columns = novas_cols
     return df
 
-# =========================
-# GARANTIR COLUNAS ÚNICAS (ANTI-ERRO FINAL)
-# =========================
+
 def garantir_colunas_unicas(df):
     cols = []
     for i, col in enumerate(df.columns):
@@ -53,22 +66,16 @@ def garantir_colunas_unicas(df):
     df.columns = cols
     return df
 
-# =========================
-# LIMPEZA DE DADOS
-# =========================
+
 def limpar_df(df):
     df.dropna(how='all', axis=1, inplace=True)
     df.dropna(how='all', axis=0, inplace=True)
     df.fillna("", inplace=True)
 
-    # remover rodapé tipo "Página X"
     df = df[~df.apply(lambda row: row.astype(str).str.contains("pág", case=False).any(), axis=1)]
-
     return df
 
-# =========================
-# PROCESSAMENTO PRINCIPAL
-# =========================
+
 @st.cache_data(show_spinner=False)
 def processar_pdf(pdf_bytes):
     todas_tabelas = []
@@ -76,7 +83,6 @@ def processar_pdf(pdf_bytes):
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for pagina in pdf.pages:
 
-            # Estratégia 1 (linhas)
             config_linhas = {
                 "vertical_strategy": "lines",
                 "horizontal_strategy": "lines",
@@ -85,7 +91,6 @@ def processar_pdf(pdf_bytes):
 
             tabelas = pagina.extract_tables(table_settings=config_linhas)
 
-            # Estratégia 2 (texto)
             if not tabelas:
                 config_texto = {
                     "vertical_strategy": "text",
@@ -103,7 +108,6 @@ def processar_pdf(pdf_bytes):
                 df = limpar_df(df)
                 df = corrigir_colunas(df)
 
-                # tentar detectar header real
                 if df.shape[0] > 1:
                     primeira_linha = df.iloc[0].astype(str)
 
@@ -113,7 +117,6 @@ def processar_pdf(pdf_bytes):
 
                 df = corrigir_colunas(df)
 
-                # ignorar tabelas ruins
                 if df.shape[1] <= 1:
                     continue
 
@@ -121,57 +124,83 @@ def processar_pdf(pdf_bytes):
 
     return todas_tabelas
 
+
+def gerar_excel(tabelas):
+    buffer = io.BytesIO()
+
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        nomes_usados = set()
+
+        for i, df in enumerate(tabelas):
+            df = garantir_colunas_unicas(df)
+
+            nome = f"Tabela_{i+1}"
+            nome = re.sub(r"[\\/*?:\[\]]", "", nome)[:31]
+
+            if nome in nomes_usados:
+                nome = f"{nome}_{i}"
+
+            nomes_usados.add(nome)
+
+            df.to_excel(writer, index=False, sheet_name=nome)
+
+    return buffer.getvalue()
+
+
 # =========================
-# UPLOAD
+# UPLOAD MULTIPLO
 # =========================
-arquivo_pdf = st.file_uploader("Selecione um PDF", type=["pdf"])
+arquivos = st.file_uploader(
+    "📂 Envie um ou mais PDFs",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
-if arquivo_pdf is not None:
-    espaco_topo = st.empty()
+if arquivos:
+    col1, col2 = st.columns([3, 1])
 
-    try:
-        with st.spinner("🔍 Processando PDF..."):
-            pdf_bytes = arquivo_pdf.read()
-            tabelas = processar_pdf(pdf_bytes)
+    with col2:
+        if st.button("🚀 Processar PDFs"):
+            progresso = st.progress(0)
 
-        if tabelas:
-            st.success(f"{len(tabelas)} tabela(s) encontrada(s)")
+            for i, arquivo in enumerate(arquivos):
+                pdf_bytes = arquivo.read()
+                tabelas = processar_pdf(pdf_bytes)
 
-            for i, df in enumerate(tabelas):
-                st.subheader(f"Tabela {i+1}")
-                st.dataframe(df, use_container_width=True)
+                if tabelas:
+                    excel_bytes = gerar_excel(tabelas)
 
-            # =========================
-            # EXPORTAR EXCEL
-            # =========================
-            buffer = io.BytesIO()
+                    st.session_state.historico.append({
+                        "nome": arquivo.name,
+                        "data": datetime.now().strftime("%d/%m %H:%M"),
+                        "arquivo": excel_bytes,
+                        "qtd": len(tabelas)
+                    })
 
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                nomes_usados = set()
+                progresso.progress((i + 1) / len(arquivos))
 
-                for i, df in enumerate(tabelas):
-                    df = garantir_colunas_unicas(df)
+            st.success("Processamento concluído!")
 
-                    nome = f"Tabela_{i+1}"
-                    nome = re.sub(r"[\\/*?:\[\]]", "", nome)[:31]
+# =========================
+# HISTÓRICO VISUAL
+# =========================
+st.markdown("## 📜 Histórico")
 
-                    if nome in nomes_usados:
-                        nome = f"{nome}_{i}"
+if st.session_state.historico:
+    for item in reversed(st.session_state.historico):
+        with st.container():
+            col1, col2, col3 = st.columns([4, 2, 2])
 
-                    nomes_usados.add(nome)
+            col1.markdown(f"**📄 {item['nome']}**  \n🕒 {item['data']}")
+            col2.markdown(f"📊 {item['qtd']} tabelas")
 
-                    df.to_excel(writer, index=False, sheet_name=nome)
-
-            espaco_topo.download_button(
-                "📥 Baixar Excel",
-                data=buffer.getvalue(),
-                file_name="tabelas_extraidas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+            col3.download_button(
+                "⬇️ Baixar Excel",
+                data=item["arquivo"],
+                file_name=f"{item['nome']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-        else:
-            espaco_topo.warning("Nenhuma tabela encontrada.")
-
-    except Exception as e:
-        st.error(f"Erro: {e}")
+            st.divider()
+else:
+    st.info("Nenhum arquivo processado ainda.")
