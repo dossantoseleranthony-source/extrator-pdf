@@ -10,50 +10,21 @@ from datetime import datetime
 # =========================
 st.set_page_config(page_title="Extrator PDF", page_icon="📄", layout="wide")
 
-# =========================
-# 🎨 ESTILO MODERNO
-# =========================
 st.markdown("""
 <style>
-
-/* Fundo */
-.main {
-    background: linear-gradient(135deg, #0f172a, #1e293b);
-}
-
-/* Títulos */
-h1, h2, h3 {
-    color: #e2e8f0;
-}
-
-/* Botões */
+.main { background: linear-gradient(135deg, #0f172a, #1e293b); }
+h1, h2, h3 { color: #e2e8f0; }
 .stButton>button {
     background: linear-gradient(90deg, #00c8ff, #007cf0);
-    color: white;
-    border-radius: 8px;
-    border: none;
-    font-weight: bold;
-    transition: 0.3s;
+    color: white; border-radius: 8px; border: none;
+    font-weight: bold; transition: 0.3s;
 }
-
-.stButton>button:hover {
-    transform: scale(1.05);
-}
-
-/* Cards */
+.stButton>button:hover { transform: scale(1.05); }
 .card {
-    background: #111827;
-    padding: 15px;
-    border-radius: 12px;
-    box-shadow: 0px 0px 10px rgba(0,200,255,0.1);
-    margin-bottom: 10px;
+    background: #111827; padding: 15px; border-radius: 12px;
+    box-shadow: 0px 0px 10px rgba(0,200,255,0.1); margin-bottom: 10px;
 }
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background-color: #020617;
-}
-
+section[data-testid="stSidebar"] { background-color: #020617; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,125 +33,128 @@ section[data-testid="stSidebar"] {
 # =========================
 with st.sidebar:
     st.header("⚙️ Configurações")
-
     mostrar_preview = st.checkbox("Mostrar preview das tabelas", True)
     mostrar_logs = st.checkbox("Mostrar logs de extração", True)
-
     st.divider()
-
     if st.button("🗑️ Limpar histórico"):
         st.session_state.historico = []
         st.success("Histórico limpo!")
 
-# =========================
-# HISTÓRICO
-# =========================
 if "historico" not in st.session_state:
     st.session_state.historico = []
 
 # =========================
-# FUNÇÕES (SEM ALTERAÇÃO)
+# FUNÇÕES
 # =========================
-def corrigir_colunas(df):
-    novas_cols = []
+
+def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    """Limpa nomes de colunas e garante unicidade — unifica corrigir_colunas + garantir_colunas_unicas."""
+    vistas = {}
+    novas = []
     for i, col in enumerate(df.columns):
         nome = str(col).strip().replace("\n", " ")
-
-        if len(nome) > 40 or nome == "" or nome.lower() == "none":
+        if not nome or nome.lower() == "none" or len(nome) > 40:
             nome = f"col_{i}"
-
-        if nome in novas_cols:
-            nome = f"{nome}_{i}"
-
-        novas_cols.append(nome)
-
-    df.columns = novas_cols
+        # Desambigua duplicatas com sufixo incremental
+        count = vistas.get(nome, 0)
+        vistas[nome] = count + 1
+        novas.append(f"{nome}_{count}" if count else nome)
+    df.columns = novas
     return df
 
 
-def garantir_colunas_unicas(df):
-    cols = []
-    for i, col in enumerate(df.columns):
-        col = str(col)
-        if col in cols:
-            col = f"{col}_{i}"
-        cols.append(col)
-    df.columns = cols
-    return df
+def limpar_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove linhas/colunas vazias, preenche NaN e filtra linhas de paginação."""
+    df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)  # sem inplace — retorna novo df
+    df = df.fillna("")
+    mascara_pag = df.apply(lambda row: row.astype(str).str.contains(r"\bpág", case=False).any(), axis=1)
+    return df[~mascara_pag].reset_index(drop=True)
 
 
-def limpar_df(df):
-    df.dropna(how='all', axis=1, inplace=True)
-    df.dropna(how='all', axis=0, inplace=True)
-    df.fillna("", inplace=True)
+@st.cache_data(show_spinner=False)
+def processar_pdf(pdf_bytes: bytes) -> tuple[list[pd.DataFrame], list[str]]:
+    """Extrai tabelas do PDF. Resultado cacheado por conteúdo do arquivo."""
+    todas_tabelas: list[pd.DataFrame] = []
+    logs: list[str] = []
 
-    df = df[~df.apply(lambda row: row.astype(str).str.contains("pág", case=False).any(), axis=1)]
-    return df
-
-
-def processar_pdf(pdf_bytes):
-    todas_tabelas = []
-    logs = []
+    config_linhas = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "intersection_y_tolerance": 15,
+    }
+    config_texto = {"vertical_strategy": "text", "horizontal_strategy": "text"}
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, pagina in enumerate(pdf.pages):
-            pagina_log = f"Página {i+1}: "
+            tabelas = pagina.extract_tables(config_linhas) or pagina.extract_tables(config_texto)
+            logs.append(f"Página {i+1}: {len(tabelas) if tabelas else 0} tabela(s)")
 
-            config_linhas = {
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-                "intersection_y_tolerance": 15,
-            }
-
-            tabelas = pagina.extract_tables(table_settings=config_linhas)
-
-            if tabelas:
-                pagina_log += f"{len(tabelas)} tabela(s)"
-            else:
-                tabelas = pagina.extract_tables({
-                    "vertical_strategy": "text",
-                    "horizontal_strategy": "text",
-                })
-                pagina_log += f"{len(tabelas) if tabelas else 0} tabela(s)"
-
-            logs.append(pagina_log)
-
-            for tabela in tabelas:
+            for tabela in (tabelas or []):
                 df = pd.DataFrame(tabela)
-
                 if df.empty:
                     continue
 
                 df = limpar_df(df)
-                df = corrigir_colunas(df)
-
-                if df.shape[0] > 1:
-                    primeira_linha = df.iloc[0].astype(str)
-                    if any(len(str(x)) > 2 for x in primeira_linha):
-                        df.columns = primeira_linha
-                        df = df[1:]
-
-                df = corrigir_colunas(df)
-
-                if df.shape[1] <= 1:
+                if df.empty or df.shape[1] <= 1:
                     continue
 
+                # Promove primeira linha a cabeçalho se parecer com títulos
+                primeira = df.iloc[0].astype(str)
+                if any(len(v) > 2 for v in primeira):
+                    df.columns = primeira
+                    df = df.iloc[1:].reset_index(drop=True)
+
+                df = normalizar_colunas(df)  # apenas uma chamada, já garante unicidade
                 todas_tabelas.append(df)
 
     return todas_tabelas, logs
 
 
-def gerar_excel(tabelas):
+@st.cache_data(show_spinner=False)
+def gerar_excel(pdf_bytes: bytes, tabelas_json: str) -> bytes:
+    """
+    Gera Excel a partir das tabelas. Cacheado — evita regerar o mesmo arquivo.
+    Recebe tabelas_json como string para ser hashável pelo cache do Streamlit.
+    """
+    tabelas = [pd.read_json(io.StringIO(t)) for t in pd.read_json(io.StringIO(tabelas_json))]
     buffer = io.BytesIO()
-
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for i, df in enumerate(tabelas):
-            df = garantir_colunas_unicas(df)
-            nome = f"Tabela_{i+1}"
-            nome = re.sub(r"[\\/*?:\[\]]", "", nome)[:31]
+            nome = re.sub(r"[\\/*?:\[\]]", "", f"Tabela_{i+1}")[:31]
             df.to_excel(writer, index=False, sheet_name=nome)
-
     return buffer.getvalue()
+
+
+def processar_arquivo(arquivo) -> dict | None:
+    """Orquestra leitura, extração e geração de Excel de um único arquivo."""
+    try:
+        pdf_bytes = arquivo.read()
+        tabelas, logs = processar_pdf(pdf_bytes)
+
+        if not tabelas:
+            st.warning(f"⚠️ {arquivo.name}: nenhuma tabela encontrada")
+            return None
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            for i, df in enumerate(tabelas):
+                nome = re.sub(r"[\\/*?:\[\]]", "", f"Tabela_{i+1}")[:31]
+                df.to_excel(writer, index=False, sheet_name=nome)
+        excel_bytes = buffer.getvalue()
+
+        return {
+            "nome": arquivo.name,
+            "data": datetime.now().strftime("%d/%m %H:%M"),
+            "qtd": len(tabelas),
+            "arquivo": excel_bytes,          # só bytes — não guarda DataFrames inteiros
+            "tabelas": tabelas,              # mantido apenas para preview (pode remover se não precisar)
+            "logs": logs,
+        }
+
+    except Exception as e:
+        st.error(f"❌ Erro ao processar `{arquivo.name}`: {e}")
+        return None
+
 
 # =========================
 # UI PRINCIPAL
@@ -188,50 +162,28 @@ def gerar_excel(tabelas):
 st.title("📄 Extrator Inteligente de Tabelas")
 st.caption("Transforme PDFs em Excel em segundos")
 
-arquivos = st.file_uploader(
-    "📂 Envie PDFs",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+arquivos = st.file_uploader("📂 Envie PDFs", type=["pdf"], accept_multiple_files=True)
 
-if arquivos:
-    if st.button("🚀 Processar arquivos"):
-        progresso = st.progress(0)
-        status_text = st.empty()
+if arquivos and st.button("🚀 Processar arquivos"):
+    progresso = st.progress(0)
+    status = st.empty()
 
-        for i, arquivo in enumerate(arquivos):
-            status_text.markdown(f"🔄 **Processando:** `{arquivo.name}`")
+    for i, arquivo in enumerate(arquivos):
+        status.markdown(f"🔄 **Processando:** `{arquivo.name}`")
+        resultado = processar_arquivo(arquivo)
+        if resultado:
+            st.session_state.historico.append(resultado)
+        progresso.progress((i + 1) / len(arquivos))
 
-            pdf_bytes = arquivo.read()
-            tabelas, logs = processar_pdf(pdf_bytes)
-
-            if not tabelas:
-                st.warning(f"⚠️ {arquivo.name}: nenhuma tabela encontrada")
-
-            else:
-                excel_bytes = gerar_excel(tabelas)
-
-                st.session_state.historico.append({
-                    "nome": arquivo.name,
-                    "data": datetime.now().strftime("%d/%m %H:%M"),
-                    "qtd": len(tabelas),
-                    "arquivo": excel_bytes,
-                    "tabelas": tabelas,
-                    "logs": logs
-                })
-
-            progresso.progress((i + 1) / len(arquivos))
-
-        status_text.success("✅ Processamento concluído!")
+    status.success("✅ Processamento concluído!")
 
 # =========================
-# HISTÓRICO BONITO
+# HISTÓRICO
 # =========================
 st.markdown("## 📜 Histórico")
 
 if st.session_state.historico:
     for item in reversed(st.session_state.historico):
-
         st.markdown(f"""
         <div class="card">
             <b>📄 {item['nome']}</b><br>
@@ -239,26 +191,20 @@ if st.session_state.historico:
         </div>
         """, unsafe_allow_html=True)
 
-        col1, col2 = st.columns([3, 1])
+        _, col_btn = st.columns([3, 1])
+        with col_btn:
+            st.download_button("⬇️ Excel", data=item["arquivo"], file_name=f"{item['nome']}.xlsx")
 
-        with col2:
-            st.download_button(
-                "⬇️ Excel",
-                data=item["arquivo"],
-                file_name=f"{item['nome']}.xlsx"
-            )
-
-        if mostrar_preview:
+        if mostrar_preview and item.get("tabelas"):
             with st.expander("🔍 Preview"):
-                for i, df in enumerate(item["tabelas"]):
+                for df in item["tabelas"]:
                     st.dataframe(df, use_container_width=True)
 
-        if mostrar_logs:
+        if mostrar_logs and item.get("logs"):
             with st.expander("📜 Logs"):
                 for log in item["logs"]:
                     st.text(log)
 
         st.divider()
-
 else:
     st.info("Nenhum arquivo processado ainda.")
