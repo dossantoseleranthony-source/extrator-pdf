@@ -5,7 +5,7 @@ import io
 import re
 from datetime import datetime
 
-# OCR / IMAGEM
+# OCR
 import pytesseract
 import cv2
 import numpy as np
@@ -13,20 +13,21 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 
 # =========================
-# CONFIG
+# CONFIG OCR (STREAMLIT CLOUD)
 # =========================
-st.set_page_config(page_title="Extrator Inteligente", layout="wide")
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # =========================
-# FUNÇÕES BASE
+# CONFIG APP
+# =========================
+st.set_page_config(page_title="Extrator de Tabelas", layout="wide")
+
+# =========================
+# FUNÇÕES AUXILIARES
 # =========================
 def limpar_df(df):
     df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
     df = df.fillna("")
-
-    mask = df.astype(str).apply(lambda col: col.str.contains("pág", case=False, na=False))
-    df = df[~mask.any(axis=1)]
-
     return df
 
 
@@ -62,11 +63,9 @@ def garantir_colunas_unicas(df):
 # =========================
 def processar_pdf(pdf_bytes):
     tabelas = []
-    logs = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for i, pagina in enumerate(pdf.pages):
-
+        for pagina in pdf.pages:
             tb = pagina.extract_tables({
                 "vertical_strategy": "lines",
                 "horizontal_strategy": "lines",
@@ -74,8 +73,6 @@ def processar_pdf(pdf_bytes):
                 "vertical_strategy": "text",
                 "horizontal_strategy": "text",
             })
-
-            logs.append(f"Página {i+1}: {len(tb) if tb else 0} tabela(s)")
 
             if not tb:
                 continue
@@ -97,52 +94,73 @@ def processar_pdf(pdf_bytes):
 
                 tabelas.append(corrigir_colunas(df))
 
-    return tabelas, logs
+    return tabelas
 
 
 # =========================
-# OCR (IMAGEM)
+# OCR MELHORADO
 # =========================
 def extrair_tabela_imagem(img):
-    img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    try:
+        img_cv = np.array(img)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    texto = pytesseract.image_to_string(thresh, lang="por")
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11, 2
+        )
 
-    linhas = texto.split("\n")
-    dados = [linha.split() for linha in linhas if linha.strip()]
+        data = pytesseract.image_to_data(
+            thresh,
+            output_type=pytesseract.Output.DATAFRAME
+        )
 
-    if not dados:
+        data = data.dropna()
+
+        linhas = data.groupby("line_num")["text"].apply(list)
+
+        tabela = [linha for linha in linhas if any(str(x).strip() for x in linha)]
+
+        if not tabela:
+            return None
+
+        return pd.DataFrame(tabela)
+
+    except:
         return None
 
-    return pd.DataFrame(dados)
-
-
-def pdf_para_imagens(pdf_bytes):
-    return convert_from_bytes(pdf_bytes)
-
 
 # =========================
-# PIPELINE INTELIGENTE
+# PIPELINE PRINCIPAL
 # =========================
 @st.cache_data(show_spinner=False)
-def processar_arquivo(pdf_bytes):
-    tabelas, logs = processar_pdf(pdf_bytes)
+def processar_arquivo(bytes_file, tipo):
+    tabelas = []
 
-    # fallback OCR
-    if not tabelas:
-        imagens = pdf_para_imagens(pdf_bytes)
+    if "pdf" in tipo:
+        tabelas = processar_pdf(bytes_file)
 
-        for i, img in enumerate(imagens):
-            df = extrair_tabela_imagem(img)
+        # fallback OCR
+        if not tabelas:
+            imagens = convert_from_bytes(bytes_file)
 
-            if df is not None and not df.empty:
-                tabelas.append(df)
-                logs.append(f"Página {i+1}: tabela via OCR")
+            for img in imagens:
+                df = extrair_tabela_imagem(img)
+                if df is not None:
+                    tabelas.append(df)
 
-    return tabelas, logs
+    else:
+        img = Image.open(io.BytesIO(bytes_file))
+        df = extrair_tabela_imagem(img)
+
+        if df is not None:
+            tabelas.append(df)
+
+    return tabelas
 
 
 # =========================
@@ -151,7 +169,7 @@ def processar_arquivo(pdf_bytes):
 def gerar_excel(tabelas):
     buffer = io.BytesIO()
 
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for i, df in enumerate(tabelas):
             df = garantir_colunas_unicas(df)
 
@@ -167,67 +185,40 @@ def gerar_excel(tabelas):
 # =========================
 # UI
 # =========================
-st.title("📄 Extrator Inteligente de Tabelas")
-st.caption("Agora com suporte a PDFs escaneados e imagens 🚀")
+st.title("📄 Extrator de Tabelas (PDF + Imagem)")
+st.caption("Funciona com PDF normal, escaneado e imagens")
 
 arquivos = st.file_uploader(
-    "Envie PDFs ou imagens",
+    "Envie arquivos",
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True
 )
 
-if "historico" not in st.session_state:
-    st.session_state.historico = []
-
 if arquivos:
-    if st.button("🚀 Processar"):
+    for arquivo in arquivos:
 
-        for arquivo in arquivos:
-            bytes_file = arquivo.getvalue()
+        # 🚫 Limite de tamanho (evita travar)
+        if arquivo.size > 10 * 1024 * 1024:
+            st.error(f"{arquivo.name} é muito grande (máx 10MB)")
+            continue
 
-            # Se for imagem
-            if arquivo.type.startswith("image"):
-                img = Image.open(io.BytesIO(bytes_file))
-                df = extrair_tabela_imagem(img)
+        st.markdown(f"### 📄 {arquivo.name}")
 
-                tabelas = [df] if df is not None else []
-                logs = ["Imagem processada via OCR"]
+        with st.spinner("Processando..."):
+            tabelas = processar_arquivo(arquivo.getvalue(), arquivo.type)
 
-            else:
-                tabelas, logs = processar_arquivo(bytes_file)
+        if tabelas:
+            excel = gerar_excel(tabelas)
 
-            if tabelas:
-                excel = gerar_excel(tabelas)
+            st.download_button(
+                "⬇️ Baixar Excel",
+                data=excel,
+                file_name=f"{arquivo.name}.xlsx"
+            )
 
-                st.session_state.historico.append({
-                    "nome": arquivo.name,
-                    "tabelas": tabelas,
-                    "logs": logs,
-                    "arquivo": excel,
-                    "data": datetime.now().strftime("%d/%m %H:%M")
-                })
-            else:
-                st.warning(f"{arquivo.name}: nenhuma tabela encontrada")
+            with st.expander("📊 Preview"):
+                for df in tabelas:
+                    st.dataframe(df, use_container_width=True)
 
-
-# =========================
-# HISTÓRICO
-# =========================
-st.markdown("## 📜 Histórico")
-
-for item in reversed(st.session_state.historico):
-    st.markdown(f"### 📄 {item['nome']} ({item['data']})")
-
-    st.download_button(
-        "⬇️ Baixar Excel",
-        data=item["arquivo"],
-        file_name=f"{item['nome']}.xlsx"
-    )
-
-    with st.expander("📊 Preview"):
-        for df in item["tabelas"]:
-            st.dataframe(df, use_container_width=True)
-
-    with st.expander("📜 Logs"):
-        for log in item["logs"]:
-            st.text(log)
+        else:
+            st.warning("Nenhuma tabela encontrada")
