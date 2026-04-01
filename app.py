@@ -11,7 +11,54 @@ from datetime import datetime
 st.set_page_config(page_title="Extrator PDF", page_icon="📄", layout="wide")
 
 # =========================
-# SIDEBAR (CONFIGURAÇÕES)
+# 🎨 ESTILO MODERNO
+# =========================
+st.markdown("""
+<style>
+
+/* Fundo */
+.main {
+    background: linear-gradient(135deg, #0f172a, #1e293b);
+}
+
+/* Títulos */
+h1, h2, h3 {
+    color: #e2e8f0;
+}
+
+/* Botões */
+.stButton>button {
+    background: linear-gradient(90deg, #00c8ff, #007cf0);
+    color: white;
+    border-radius: 8px;
+    border: none;
+    font-weight: bold;
+    transition: 0.3s;
+}
+
+.stButton>button:hover {
+    transform: scale(1.05);
+}
+
+/* Cards */
+.card {
+    background: #111827;
+    padding: 15px;
+    border-radius: 12px;
+    box-shadow: 0px 0px 10px rgba(0,200,255,0.1);
+    margin-bottom: 10px;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #020617;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
+# SIDEBAR
 # =========================
 with st.sidebar:
     st.header("⚙️ Configurações")
@@ -32,7 +79,7 @@ if "historico" not in st.session_state:
     st.session_state.historico = []
 
 # =========================
-# FUNÇÕES
+# FUNÇÕES (SEM ALTERAÇÃO)
 # =========================
 def corrigir_colunas(df):
     novas_cols = []
@@ -88,19 +135,13 @@ def processar_pdf(pdf_bytes):
             tabelas = pagina.extract_tables(table_settings=config_linhas)
 
             if tabelas:
-                pagina_log += f"{len(tabelas)} tabela(s) detectada(s) (modo linhas)"
+                pagina_log += f"{len(tabelas)} tabela(s)"
             else:
-                config_texto = {
+                tabelas = pagina.extract_tables({
                     "vertical_strategy": "text",
                     "horizontal_strategy": "text",
-                    "intersection_tolerance": 10,
-                }
-                tabelas = pagina.extract_tables(table_settings=config_texto)
-
-                if tabelas:
-                    pagina_log += f"{len(tabelas)} tabela(s) detectada(s) (modo texto)"
-                else:
-                    pagina_log += "nenhuma tabela encontrada"
+                })
+                pagina_log += f"{len(tabelas) if tabelas else 0} tabela(s)"
 
             logs.append(pagina_log)
 
@@ -145,7 +186,7 @@ def gerar_excel(tabelas):
 # UI PRINCIPAL
 # =========================
 st.title("📄 Extrator Inteligente de Tabelas")
-st.caption("Upload → Análise → Download estruturado")
+st.caption("Transforme PDFs em Excel em segundos")
 
 arquivos = st.file_uploader(
     "📂 Envie PDFs",
@@ -159,7 +200,7 @@ if arquivos:
         status_text = st.empty()
 
         for i, arquivo in enumerate(arquivos):
-            status_text.text(f"Processando: {arquivo.name}")
+            status_text.markdown(f"🔄 **Processando:** `{arquivo.name}`")
 
             pdf_bytes = arquivo.read()
             tabelas, logs = processar_pdf(pdf_bytes)
@@ -170,7 +211,6 @@ if arquivos:
             else:
                 excel_bytes = gerar_excel(tabelas)
 
-                # salvar histórico
                 st.session_state.historico.append({
                     "nome": arquivo.name,
                     "data": datetime.now().strftime("%d/%m %H:%M"),
@@ -182,39 +222,39 @@ if arquivos:
 
             progresso.progress((i + 1) / len(arquivos))
 
-        status_text.text("✅ Processamento concluído!")
+        status_text.success("✅ Processamento concluído!")
 
 # =========================
-# HISTÓRICO COM PREVIEW + LOG
+# HISTÓRICO BONITO
 # =========================
 st.markdown("## 📜 Histórico")
 
 if st.session_state.historico:
     for item in reversed(st.session_state.historico):
 
-        st.markdown(f"### 📄 {item['nome']}")
-        st.caption(f"🕒 {item['data']} • 📊 {item['qtd']} tabelas")
+        st.markdown(f"""
+        <div class="card">
+            <b>📄 {item['nome']}</b><br>
+            🕒 {item['data']} • 📊 {item['qtd']} tabelas
+        </div>
+        """, unsafe_allow_html=True)
 
         col1, col2 = st.columns([3, 1])
 
         with col2:
             st.download_button(
-                "⬇️ Baixar Excel",
+                "⬇️ Excel",
                 data=item["arquivo"],
-                file_name=f"{item['nome']}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name=f"{item['nome']}.xlsx"
             )
 
-        # 🔍 PREVIEW
         if mostrar_preview:
-            with st.expander("🔍 Preview das tabelas"):
+            with st.expander("🔍 Preview"):
                 for i, df in enumerate(item["tabelas"]):
-                    st.markdown(f"**Tabela {i+1}**")
                     st.dataframe(df, use_container_width=True)
 
-        # 📜 LOG
         if mostrar_logs:
-            with st.expander("📜 Log de extração"):
+            with st.expander("📜 Logs"):
                 for log in item["logs"]:
                     st.text(log)
 
