@@ -6,6 +6,7 @@ import re
 import json
 import os
 import time
+import base64
 from datetime import datetime
 
 import pytesseract
@@ -27,11 +28,12 @@ st.set_page_config(page_title="Extrator Inteligente", layout="wide")
 # =========================
 # HISTÓRICO
 # =========================
-def salvar_historico(nome, qtd):
+def salvar_historico(nome, qtd, excel_bytes):
     registro = {
         "arquivo": nome,
         "qtd_tabelas": qtd,
-        "data": datetime.now().strftime("%d/%m %H:%M")
+        "data": datetime.now().strftime("%d/%m %H:%M"),
+        "excel": base64.b64encode(excel_bytes).decode("utf-8")
     }
 
     if os.path.exists("historico.json"):
@@ -83,6 +85,7 @@ def processar_pdf(pdf_bytes):
 
             for tabela in tb:
                 df = pd.DataFrame(tabela)
+
                 if df.empty or df.shape[1] <= 1:
                     continue
 
@@ -100,7 +103,7 @@ def processar_pdf(pdf_bytes):
     return tabelas, logs
 
 # =========================
-# OCR (COLUNAS ORGANIZADAS)
+# OCR
 # =========================
 def extrair_tabela_ocr(img):
     logs = []
@@ -186,7 +189,7 @@ def gerar_excel(tabelas):
 # UI
 # =========================
 st.title("📄 Extrator Inteligente de Tabelas")
-st.caption("Limite: 50MB por arquivo • Histórico: 20 registros")
+st.caption("Até 50MB por arquivo • Histórico com download")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
@@ -223,9 +226,9 @@ if arquivos:
                 continue
 
             if tabelas:
-                salvar_historico(arquivo.name, len(tabelas))
-
                 excel = gerar_excel(tabelas)
+
+                salvar_historico(arquivo.name, len(tabelas), excel)
 
                 st.download_button(
                     f"⬇️ {arquivo.name}",
@@ -251,5 +254,20 @@ if arquivos:
 # =========================
 st.markdown("## 📜 Histórico")
 
-for item in carregar_historico()[::-1]:
-    st.write(f"{item['data']} - {item['arquivo']} ({item['qtd_tabelas']} tabelas)")
+historico = carregar_historico()
+
+if historico:
+    for item in historico[::-1]:
+
+        st.markdown(f"### 📄 {item['arquivo']}")
+        st.caption(f"{item['data']} • {item['qtd_tabelas']} tabelas")
+
+        excel_bytes = base64.b64decode(item["excel"])
+
+        st.download_button(
+            "⬇️ Baixar novamente",
+            data=excel_bytes,
+            file_name=f"{item['arquivo']}.xlsx"
+        )
+else:
+    st.info("Nenhum histórico ainda.")
