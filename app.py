@@ -7,6 +7,7 @@ import json
 import os
 import time
 import base64
+import zipfile
 from datetime import datetime
 
 import pytesseract
@@ -47,7 +48,6 @@ def salvar_historico(nome, qtd, excel_bytes):
 
     with open("historico.json", "w") as f:
         json.dump(dados, f, indent=4)
-
 
 def carregar_historico():
     if not os.path.exists("historico.json"):
@@ -92,7 +92,7 @@ def processar_pdf(pdf_bytes):
     return tabelas, logs
 
 # =========================
-# OCR SUPER (COM DETECÇÃO DE TABELA)
+# OCR SUPER (detecção de tabela)
 # =========================
 def extrair_tabela_super(img):
     logs = []
@@ -107,11 +107,9 @@ def extrair_tabela_super(img):
         15, 4
     )
 
-    # linhas horizontais
     horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
     horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel)
 
-    # linhas verticais
     vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
     vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
 
@@ -160,7 +158,7 @@ def extrair_tabela_super(img):
     return None, logs
 
 # =========================
-# OCR SIMPLES (fallback)
+# OCR fallback
 # =========================
 def extrair_tabela_ocr(img):
     logs = []
@@ -212,7 +210,6 @@ def processar_arquivo(bytes_file, tipo):
             imagens = convert_from_bytes(bytes_file)
 
             for i, img in enumerate(imagens):
-
                 df, log = extrair_tabela_super(img)
 
                 if df is None:
@@ -258,8 +255,8 @@ def gerar_excel(tabelas):
 # =========================
 # UI
 # =========================
-st.title("📄 Extrator Inteligente PRO (Grátis)")
-st.caption("Máxima precisão sem custo • Histórico com download")
+st.title("📄 Extrator Inteligente PRO")
+st.caption("Máxima precisão • Download em lote • 100% grátis")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
@@ -277,6 +274,7 @@ if arquivos:
         status = st.empty()
 
         total = len(arquivos)
+        arquivos_excel = []
 
         for i, arquivo in enumerate(arquivos):
 
@@ -297,6 +295,7 @@ if arquivos:
 
             if tabelas:
                 excel = gerar_excel(tabelas)
+                arquivos_excel.append((arquivo.name, excel))
 
                 salvar_historico(arquivo.name, len(tabelas), excel)
 
@@ -317,6 +316,23 @@ if arquivos:
             progresso.progress((i + 1) / total)
             time.sleep(0.3)
 
+        # ZIP DOWNLOAD
+        if arquivos_excel:
+            zip_buffer = io.BytesIO()
+
+            with zipfile.ZipFile(zip_buffer, "w") as zf:
+                for nome, excel_bytes in arquivos_excel:
+                    nome_limpo = nome.split(".")[0]
+                    zf.writestr(f"{nome_limpo}.xlsx", excel_bytes)
+
+            zip_buffer.seek(0)
+
+            st.download_button(
+                "📦 Baixar TODOS (ZIP)",
+                data=zip_buffer,
+                file_name="tabelas_extraidas.zip"
+            )
+
         status.success("✅ Concluído!")
 
 # =========================
@@ -328,7 +344,6 @@ historico = carregar_historico()
 
 if historico:
     for item in historico[::-1]:
-
         st.markdown(f"### 📄 {item['arquivo']}")
         st.caption(f"{item['data']} • {item['qtd_tabelas']} tabelas")
 
