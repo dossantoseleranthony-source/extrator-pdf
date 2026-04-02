@@ -5,9 +5,9 @@ import io
 import re
 import json
 import os
+import time
 from datetime import datetime
 
-# OCR
 import pytesseract
 import cv2
 import numpy as np
@@ -15,9 +15,12 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 
 # =========================
-# CONFIG OCR (STREAMLIT CLOUD)
+# CONFIG
 # =========================
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+MAX_SIZE_MB = 50
+MAX_HISTORICO = 20
 
 st.set_page_config(page_title="Extrator Inteligente", layout="wide")
 
@@ -38,6 +41,7 @@ def salvar_historico(nome, qtd):
         dados = []
 
     dados.append(registro)
+    dados = dados[-MAX_HISTORICO:]
 
     with open("historico.json", "w") as f:
         json.dump(dados, f, indent=4)
@@ -54,47 +58,31 @@ def carregar_historico():
 # =========================
 def limpar_df(df):
     df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    df = df.fillna("")
-    return df
-
+    return df.fillna("")
 
 def corrigir_colunas(df):
-    novas = []
+    cols = []
     for i, col in enumerate(df.columns):
-        nome = str(col).strip()
-        if not nome or len(nome) > 40:
-            nome = f"col_{i}"
-        if nome in novas:
+        nome = str(col).strip() or f"col_{i}"
+        if nome in cols:
             nome = f"{nome}_{i}"
-        novas.append(nome)
-    df.columns = novas
+        cols.append(nome)
+    df.columns = cols
     return df
 
 # =========================
 # PDF
 # =========================
 def processar_pdf(pdf_bytes):
-    tabelas = []
-    logs = []
+    tabelas, logs = [], []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, pagina in enumerate(pdf.pages):
-            tb = pagina.extract_tables({
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-            }) or pagina.extract_tables({
-                "vertical_strategy": "text",
-                "horizontal_strategy": "text",
-            })
-
-            logs.append(f"Página {i+1}: {len(tb) if tb else 0} tabela(s) encontradas")
-
-            if not tb:
-                continue
+            tb = pagina.extract_tables() or []
+            logs.append(f"Página {i+1}: {len(tb)} tabela(s)")
 
             for tabela in tb:
                 df = pd.DataFrame(tabela)
-
                 if df.empty or df.shape[1] <= 1:
                     continue
 
@@ -102,19 +90,19 @@ def processar_pdf(pdf_bytes):
                 df = corrigir_colunas(df)
 
                 if df.shape[0] > 1:
-                    primeira = df.iloc[0].astype(str)
-                    if primeira.str.len().mean() > 2:
-                        df.columns = primeira
+                    header = df.iloc[0].astype(str)
+                    if header.str.len().mean() > 2:
+                        df.columns = header
                         df = df.iloc[1:]
 
-                tabelas.append(corrigir_colunas(df))
+                tabelas.append(df)
 
     return tabelas, logs
 
 # =========================
-# OCR INTELIGENTE (ORGANIZA COLUNAS)
+# OCR (COLUNAS ORGANIZADAS)
 # =========================
-def extrair_tabela_estruturada(img):
+def extrair_tabela_ocr(img):
     logs = []
 
     img_cv = np.array(img)
@@ -123,9 +111,7 @@ def extrair_tabela_estruturada(img):
     data = pytesseract.image_to_data(
         gray,
         output_type=pytesseract.Output.DATAFRAME
-    )
-
-    data = data.dropna()
+    ).dropna()
 
     linhas = data.groupby("line_num")
 
@@ -143,7 +129,7 @@ def extrair_tabela_estruturada(img):
     tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
 
     if tabela_pad:
-        logs.append("Tabela estruturada via OCR (colunas organizadas)")
+        logs.append("OCR aplicado com organização de colunas")
         return pd.DataFrame(tabela_pad), logs
 
     return None, logs
@@ -153,8 +139,7 @@ def extrair_tabela_estruturada(img):
 # =========================
 @st.cache_data(show_spinner=False)
 def processar_arquivo(bytes_file, tipo):
-    tabelas = []
-    logs = []
+    tabelas, logs = [], []
 
     if "pdf" in tipo:
         tb, log_pdf = processar_pdf(bytes_file)
@@ -162,21 +147,20 @@ def processar_arquivo(bytes_file, tipo):
         logs.extend(log_pdf)
 
         if not tabelas:
-            imagens = convert_from_bytes(bytes_file)
-            logs.append("Nenhuma tabela detectada → usando OCR")
+            logs.append("Fallback para OCR")
 
+            imagens = convert_from_bytes(bytes_file)
             for i, img in enumerate(imagens):
-                df, log_ocr = extrair_tabela_estruturada(img)
-                logs.extend([f"Página {i+1}: {l}" for l in log_ocr])
+                df, log = extrair_tabela_ocr(img)
+                logs.extend([f"Página {i+1}: {l}" for l in log])
 
                 if df is not None:
                     tabelas.append(df)
 
     else:
         img = Image.open(io.BytesIO(bytes_file))
-        df, log_ocr = extrair_tabela_estruturada(img)
-
-        logs.extend(log_ocr)
+        df, log = extrair_tabela_ocr(img)
+        logs.extend(log)
 
         if df is not None:
             tabelas.append(df)
@@ -202,58 +186,70 @@ def gerar_excel(tabelas):
 # UI
 # =========================
 st.title("📄 Extrator Inteligente de Tabelas")
-st.caption("PDF + Imagem + OCR com organização automática")
+st.caption("Limite: 50MB por arquivo • Histórico: 20 registros")
 
 arquivos = st.file_uploader(
-    "Envie arquivos",
+    "Envie PDFs ou imagens",
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True
 )
 
 if arquivos:
-    for arquivo in arquivos:
 
-        if arquivo.size > 10 * 1024 * 1024:
-            st.error(f"{arquivo.name} muito grande (máx 10MB)")
-            continue
+    st.info(f"{len(arquivos)} arquivo(s) carregado(s)")
 
-        st.markdown(f"## 📄 {arquivo.name}")
+    if st.button("🚀 Iniciar processamento"):
 
-        with st.spinner("Processando..."):
-            tabelas, logs = processar_arquivo(arquivo.getvalue(), arquivo.type)
+        progresso = st.progress(0)
+        status = st.empty()
 
-        if tabelas:
-            salvar_historico(arquivo.name, len(tabelas))
+        total = len(arquivos)
 
-            excel = gerar_excel(tabelas)
+        for i, arquivo in enumerate(arquivos):
 
-            st.download_button(
-                "⬇️ Baixar Excel",
-                data=excel,
-                file_name=f"{arquivo.name}.xlsx"
-            )
+            status.text(f"Processando {i+1}/{total} → {arquivo.name}")
 
-            with st.expander("📊 Preview das Tabelas"):
-                for i, df in enumerate(tabelas):
-                    st.write(f"Tabela {i+1}")
-                    st.dataframe(df, use_container_width=True)
+            if arquivo.size > MAX_SIZE_MB * 1024 * 1024:
+                st.error(f"{arquivo.name} excede {MAX_SIZE_MB}MB")
+                continue
 
-            with st.expander("📜 Logs de processamento"):
-                for log in logs:
-                    st.text(log)
+            try:
+                tabelas, logs = processar_arquivo(
+                    arquivo.getvalue(),
+                    arquivo.type
+                )
+            except Exception as e:
+                st.error(f"Erro em {arquivo.name}: {str(e)}")
+                continue
 
-        else:
-            st.warning("Nenhuma tabela encontrada")
+            if tabelas:
+                salvar_historico(arquivo.name, len(tabelas))
+
+                excel = gerar_excel(tabelas)
+
+                st.download_button(
+                    f"⬇️ {arquivo.name}",
+                    data=excel,
+                    file_name=f"{arquivo.name}.xlsx"
+                )
+
+                with st.expander(f"📊 Preview - {arquivo.name}"):
+                    for df in tabelas:
+                        st.dataframe(df, use_container_width=True)
+
+                with st.expander(f"📜 Logs - {arquivo.name}"):
+                    for log in logs:
+                        st.text(log)
+
+            progresso.progress((i + 1) / total)
+            time.sleep(0.3)
+
+        status.success("✅ Concluído!")
 
 # =========================
 # HISTÓRICO
 # =========================
 st.markdown("## 📜 Histórico")
 
-historico = carregar_historico()
-
-if historico:
-    for item in historico[::-1]:
-        st.write(f"{item['data']} - {item['arquivo']} ({item['qtd_tabelas']} tabelas)")
-else:
-    st.info("Nenhum histórico ainda.")
+for item in carregar_historico()[::-1]:
+    st.write(f"{item['data']} - {item['arquivo']} ({item['qtd_tabelas']} tabelas)")
