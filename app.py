@@ -48,7 +48,6 @@ def salvar_historico(nome, qtd, excel_bytes):
     with open("historico.json", "w") as f:
         json.dump(dados, f, indent=4)
 
-
 def carregar_historico():
     if not os.path.exists("historico.json"):
         return []
@@ -103,7 +102,7 @@ def processar_pdf(pdf_bytes):
     return tabelas, logs
 
 # =========================
-# OCR
+# OCR MELHORADO
 # =========================
 def extrair_tabela_ocr(img):
     logs = []
@@ -111,8 +110,18 @@ def extrair_tabela_ocr(img):
     img_cv = np.array(img)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
+    # melhora contraste
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11, 2
+    )
+
     data = pytesseract.image_to_data(
-        gray,
+        thresh,
         output_type=pytesseract.Output.DATAFRAME
     ).dropna()
 
@@ -132,7 +141,7 @@ def extrair_tabela_ocr(img):
     tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
 
     if tabela_pad:
-        logs.append("OCR aplicado com organização de colunas")
+        logs.append("OCR melhorado aplicado")
         return pd.DataFrame(tabela_pad), logs
 
     return None, logs
@@ -150,7 +159,7 @@ def processar_arquivo(bytes_file, tipo):
         logs.extend(log_pdf)
 
         if not tabelas:
-            logs.append("Fallback para OCR")
+            logs.append("Fallback OCR")
 
             imagens = convert_from_bytes(bytes_file)
             for i, img in enumerate(imagens):
@@ -188,8 +197,8 @@ def gerar_excel(tabelas):
 # =========================
 # UI
 # =========================
-st.title("📄 Extrator Inteligente de Tabelas")
-st.caption("Até 50MB por arquivo • Histórico com download")
+st.title("📄 Extrator Inteligente (100% grátis)")
+st.caption("OCR melhorado • Histórico com download • Até 50MB")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
