@@ -20,7 +20,7 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 MAX_SIZE_MB = 50
 MAX_HISTORICO = 5
 
-st.set_page_config(page_title="Extrator Inteligente PRO", layout="wide")
+st.set_page_config(page_title="Extrator Inteligente", layout="wide")
 
 # =========================
 # SESSION STATE
