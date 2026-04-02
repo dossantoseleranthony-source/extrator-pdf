@@ -62,6 +62,20 @@ def limpar_df(df):
     df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
     return df.fillna("")
 
+# 🔥 NOVO: evitar colunas duplicadas
+def garantir_colunas_unicas(df):
+    cols = []
+    for i, col in enumerate(df.columns):
+        col = str(col).strip() or f"col_{i}"
+
+        if col in cols:
+            col = f"{col}_{i}"
+
+        cols.append(col)
+
+    df.columns = cols
+    return df
+
 # =========================
 # PDF
 # =========================
@@ -87,12 +101,13 @@ def processar_pdf(pdf_bytes):
                         df.columns = header
                         df = df.iloc[1:]
 
+                df = garantir_colunas_unicas(df)
                 tabelas.append(df)
 
     return tabelas, logs
 
 # =========================
-# OCR SUPER (detecção de tabela)
+# OCR SUPER
 # =========================
 def extrair_tabela_super(img):
     logs = []
@@ -152,8 +167,10 @@ def extrair_tabela_super(img):
         tabela.append(linha)
 
     if tabela:
+        df = pd.DataFrame(tabela)
+        df = garantir_colunas_unicas(df)
         logs.append("Tabela detectada com estrutura (OpenCV + OCR)")
-        return pd.DataFrame(tabela), logs
+        return df, logs
 
     return None, logs
 
@@ -187,8 +204,10 @@ def extrair_tabela_ocr(img):
     tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
 
     if tabela_pad:
+        df = pd.DataFrame(tabela_pad)
+        df = garantir_colunas_unicas(df)
         logs.append("OCR simples aplicado")
-        return pd.DataFrame(tabela_pad), logs
+        return df, logs
 
     return None, logs
 
@@ -247,6 +266,7 @@ def gerar_excel(tabelas):
         for i, df in enumerate(tabelas):
             nome = f"Tabela_{i+1}"
             nome = re.sub(r"[\\/*?:\[\]]", "", nome)[:31]
+            df = garantir_colunas_unicas(df)
             df.to_excel(writer, index=False, sheet_name=nome)
 
     buffer.seek(0)
@@ -307,6 +327,7 @@ if arquivos:
 
                 with st.expander(f"📊 Preview - {arquivo.name}"):
                     for df in tabelas:
+                        df = garantir_colunas_unicas(df)
                         st.dataframe(df, use_container_width=True)
 
                 with st.expander(f"📜 Logs - {arquivo.name}"):
@@ -316,7 +337,6 @@ if arquivos:
             progresso.progress((i + 1) / total)
             time.sleep(0.3)
 
-        # ZIP DOWNLOAD
         if arquivos_excel:
             zip_buffer = io.BytesIO()
 
