@@ -23,7 +23,7 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 MAX_SIZE_MB = 50
 MAX_HISTORICO = 20
 
-st.set_page_config(page_title="Extrator Inteligente", layout="wide")
+st.set_page_config(page_title="Extrator Inteligente PRO", layout="wide")
 
 # =========================
 # HISTÓRICO
@@ -48,6 +48,7 @@ def salvar_historico(nome, qtd, excel_bytes):
     with open("historico.json", "w") as f:
         json.dump(dados, f, indent=4)
 
+
 def carregar_historico():
     if not os.path.exists("historico.json"):
         return []
@@ -60,16 +61,6 @@ def carregar_historico():
 def limpar_df(df):
     df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
     return df.fillna("")
-
-def corrigir_colunas(df):
-    cols = []
-    for i, col in enumerate(df.columns):
-        nome = str(col).strip() or f"col_{i}"
-        if nome in cols:
-            nome = f"{nome}_{i}"
-        cols.append(nome)
-    df.columns = cols
-    return df
 
 # =========================
 # PDF
@@ -89,7 +80,6 @@ def processar_pdf(pdf_bytes):
                     continue
 
                 df = limpar_df(df)
-                df = corrigir_colunas(df)
 
                 if df.shape[0] > 1:
                     header = df.iloc[0].astype(str)
@@ -102,7 +92,75 @@ def processar_pdf(pdf_bytes):
     return tabelas, logs
 
 # =========================
-# OCR MELHORADO
+# OCR SUPER (COM DETECÇÃO DE TABELA)
+# =========================
+def extrair_tabela_super(img):
+    logs = []
+
+    img_cv = np.array(img)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        15, 4
+    )
+
+    # linhas horizontais
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+    horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel)
+
+    # linhas verticais
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+    vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
+
+    table_mask = cv2.add(horizontal, vertical)
+
+    contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = [cv2.boundingRect(c) for c in contours]
+    boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
+
+    rows = []
+    current_row = []
+    last_y = -1
+
+    for (x, y, w, h) in boxes:
+        if last_y == -1:
+            last_y = y
+
+        if abs(y - last_y) > 10:
+            rows.append(current_row)
+            current_row = []
+            last_y = y
+
+        current_row.append((x, y, w, h))
+
+    if current_row:
+        rows.append(current_row)
+
+    tabela = []
+
+    for row in rows:
+        row = sorted(row, key=lambda b: b[0])
+        linha = []
+
+        for (x, y, w, h) in row:
+            cell = img_cv[y:y+h, x:x+w]
+            text = pytesseract.image_to_string(cell, config="--oem 3 --psm 6")
+            linha.append(text.strip())
+
+        tabela.append(linha)
+
+    if tabela:
+        logs.append("Tabela detectada com estrutura (OpenCV + OCR)")
+        return pd.DataFrame(tabela), logs
+
+    return None, logs
+
+# =========================
+# OCR SIMPLES (fallback)
 # =========================
 def extrair_tabela_ocr(img):
     logs = []
@@ -110,18 +168,8 @@ def extrair_tabela_ocr(img):
     img_cv = np.array(img)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # melhora contraste
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        11, 2
-    )
-
     data = pytesseract.image_to_data(
-        thresh,
+        gray,
         output_type=pytesseract.Output.DATAFRAME
     ).dropna()
 
@@ -141,7 +189,7 @@ def extrair_tabela_ocr(img):
     tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
 
     if tabela_pad:
-        logs.append("OCR melhorado aplicado")
+        logs.append("OCR simples aplicado")
         return pd.DataFrame(tabela_pad), logs
 
     return None, logs
@@ -159,11 +207,18 @@ def processar_arquivo(bytes_file, tipo):
         logs.extend(log_pdf)
 
         if not tabelas:
-            logs.append("Fallback OCR")
+            logs.append("Fallback OCR com detecção de tabela")
 
             imagens = convert_from_bytes(bytes_file)
+
             for i, img in enumerate(imagens):
-                df, log = extrair_tabela_ocr(img)
+
+                df, log = extrair_tabela_super(img)
+
+                if df is None:
+                    df, log2 = extrair_tabela_ocr(img)
+                    log.extend(log2)
+
                 logs.extend([f"Página {i+1}: {l}" for l in log])
 
                 if df is not None:
@@ -171,7 +226,13 @@ def processar_arquivo(bytes_file, tipo):
 
     else:
         img = Image.open(io.BytesIO(bytes_file))
-        df, log = extrair_tabela_ocr(img)
+
+        df, log = extrair_tabela_super(img)
+
+        if df is None:
+            df, log2 = extrair_tabela_ocr(img)
+            log.extend(log2)
+
         logs.extend(log)
 
         if df is not None:
@@ -197,8 +258,8 @@ def gerar_excel(tabelas):
 # =========================
 # UI
 # =========================
-st.title("📄 Extrator Inteligente (100% grátis)")
-st.caption("OCR melhorado • Histórico com download • Até 50MB")
+st.title("📄 Extrator Inteligente PRO (Grátis)")
+st.caption("Máxima precisão sem custo • Histórico com download")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
