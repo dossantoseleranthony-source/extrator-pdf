@@ -255,8 +255,8 @@ def gerar_excel(tabelas):
 # =========================
 # UI
 # =========================
-st.title("📄 Extrator Inteligente PRO")
-st.caption("Máxima precisão • Download em lote • 100% grátis")
+st.title("📄 Extrator Inteligente")
+st.caption("Download em lote")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
