@@ -3,10 +3,6 @@ import pdfplumber
 import pandas as pd
 import io
 import re
-import json
-import os
-import time
-import base64
 import zipfile
 from datetime import datetime
 
@@ -27,93 +23,104 @@ MAX_HISTORICO = 5
 st.set_page_config(page_title="Extrator Inteligente PRO", layout="wide")
 
 # =========================
-# HISTÓRICO
+# SESSION STATE
 # =========================
-def salvar_historico(nome, qtd, excel_bytes):
-    registro = {
-        "arquivo": nome,
-        "qtd_tabelas": qtd,
-        "data": datetime.now().strftime("%d/%m %H:%M"),
-        "excel": base64.b64encode(excel_bytes).decode("utf-8")
-    }
+if "historico" not in st.session_state:
+    st.session_state.historico = []
 
-    if os.path.exists("historico.json"):
-        with open("historico.json", "r") as f:
-            dados = json.load(f)
-    else:
-        dados = []
-
-    dados.append(registro)
-    dados = dados[-MAX_HISTORICO:]
-
-    with open("historico.json", "w") as f:
-        json.dump(dados, f, indent=4)
-
-def carregar_historico():
-    if not os.path.exists("historico.json"):
-        return []
-    with open("historico.json", "r") as f:
-        return json.load(f)
+if "resultados" not in st.session_state:
+    st.session_state.resultados = []
 
 # =========================
-# LIMPEZA
+# FUNÇÕES DE LIMPEZA
 # =========================
-def limpar_df(df):
-    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-    return df.fillna("")
 
-# 🔥 NOVO: evitar colunas duplicadas
-def garantir_colunas_unicas(df):
-    cols = []
+def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Limpa nomes de colunas e garante unicidade.
+    Usa contador por nome — sem índice global como sufixo.
+    """
+    seen: dict[str, int] = {}
+    novas: list[str] = []
+
     for i, col in enumerate(df.columns):
-        col = str(col).strip() or f"col_{i}"
+        nome = str(col).strip().replace("\n", " ")
+        if not nome or nome.lower() == "none" or len(nome) > 40:
+            nome = f"col_{i}"
 
-        if col in cols:
-            col = f"{col}_{i}"
+        count = seen.get(nome, 0)
+        seen[nome] = count + 1
+        novas.append(f"{nome}_{count}" if count else nome)
 
-        cols.append(col)
-
-    df.columns = cols
+    df.columns = novas
     return df
+
+
+def limpar_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove linhas/colunas vazias, preenche NaN e filtra linhas de paginação."""
+    df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
+    df = df.fillna("")
+    # FIX v1: filtro de paginação que havia sido removido nesta versão
+    mascara_pag = df.apply(
+        lambda row: row.astype(str).str.contains(r"\bpág", case=False).any(), axis=1
+    )
+    return df[~mascara_pag].reset_index(drop=True)
+
 
 # =========================
 # PDF
 # =========================
-def processar_pdf(pdf_bytes):
-    tabelas, logs = [], []
+
+def processar_pdf(pdf_bytes: bytes) -> tuple[list[pd.DataFrame], list[str]]:
+    tabelas: list[pd.DataFrame] = []
+    logs: list[str] = []
+
+    config_linhas = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "intersection_y_tolerance": 15,
+    }
+    config_texto = {"vertical_strategy": "text", "horizontal_strategy": "text"}
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, pagina in enumerate(pdf.pages):
-            tb = pagina.extract_tables() or []
+            # Tenta extração por linhas primeiro, depois por texto
+            tb = pagina.extract_tables(config_linhas) or pagina.extract_tables(config_texto) or []
             logs.append(f"Página {i+1}: {len(tb)} tabela(s)")
 
             for tabela in tb:
                 df = pd.DataFrame(tabela)
-
                 if df.empty or df.shape[1] <= 1:
                     continue
 
                 df = limpar_df(df)
+                if df.empty:
+                    continue
 
-                if df.shape[0] > 1:
-                    header = df.iloc[0].astype(str)
-                    if header.str.len().mean() > 2:
-                        df.columns = header
-                        df = df.iloc[1:]
+                # Promove primeira linha a cabeçalho se parecer com títulos
+                primeira = df.iloc[0].astype(str)
+                if primeira.str.len().mean() > 2:
+                    df.columns = primeira
+                    df = df.iloc[1:].reset_index(drop=True)
 
-                df = garantir_colunas_unicas(df)
+                # Normalização chamada UMA vez só aqui
+                df = normalizar_colunas(df)
                 tabelas.append(df)
 
     return tabelas, logs
 
+
 # =========================
-# OCR SUPER
+# OCR — detecção de tabela por estrutura (OpenCV)
 # =========================
-def extrair_tabela_super(img):
-    logs = []
+
+def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
+    logs: list[str] = []
 
     img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    # FIX crítico: PIL entrega RGB — converter corretamente para escala de cinza
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)  # era BGR2GRAY — invertia canais R e B
 
     thresh = cv2.adaptiveThreshold(
         gray, 255,
@@ -122,101 +129,101 @@ def extrair_tabela_super(img):
         15, 4
     )
 
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-    horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel)
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+    horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
 
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-    vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+    vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
 
     table_mask = cv2.add(horizontal, vertical)
 
     contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = sorted([cv2.boundingRect(c) for c in contours], key=lambda b: (b[1], b[0]))
 
-    boxes = [cv2.boundingRect(c) for c in contours]
-    boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
-
-    rows = []
-    current_row = []
+    rows: list[list] = []
+    current_row: list = []
     last_y = -1
 
     for (x, y, w, h) in boxes:
         if last_y == -1:
             last_y = y
-
         if abs(y - last_y) > 10:
-            rows.append(current_row)
+            if current_row:
+                rows.append(current_row)
             current_row = []
             last_y = y
-
         current_row.append((x, y, w, h))
 
     if current_row:
         rows.append(current_row)
 
-    tabela = []
+    tabela: list[list[str]] = []
 
     for row in rows:
-        row = sorted(row, key=lambda b: b[0])
-        linha = []
-
-        for (x, y, w, h) in row:
+        row_sorted = sorted(row, key=lambda b: b[0])
+        linha: list[str] = []
+        for (x, y, w, h) in row_sorted:
             cell = img_cv[y:y+h, x:x+w]
             text = pytesseract.image_to_string(cell, config="--oem 3 --psm 6")
             linha.append(text.strip())
-
         tabela.append(linha)
 
     if tabela:
-        df = pd.DataFrame(tabela)
-        df = garantir_colunas_unicas(df)
-        logs.append("Tabela detectada com estrutura (OpenCV + OCR)")
+        df = normalizar_colunas(pd.DataFrame(tabela))
+        logs.append("Tabela detectada via OpenCV + OCR")
         return df, logs
 
     return None, logs
 
+
 # =========================
-# OCR fallback
+# OCR — fallback simples (linha por linha)
 # =========================
-def extrair_tabela_ocr(img):
-    logs = []
+
+def extrair_tabela_ocr(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
+    logs: list[str] = []
 
     img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    data = pytesseract.image_to_data(
-        gray,
-        output_type=pytesseract.Output.DATAFRAME
-    ).dropna()
+    # FIX crítico: mesmo bug de canal de cor corrigido aqui
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
 
-    linhas = data.groupby("line_num")
+    data = (
+        pytesseract
+        .image_to_data(gray, output_type=pytesseract.Output.DATAFRAME)
+        .dropna()
+    )
 
-    tabela = []
+    tabela: list[list[str]] = []
     max_cols = 0
 
-    for _, linha in linhas:
-        palavras = linha.sort_values("left")
-        row = palavras["text"].tolist()
-
+    for _, linha in data.groupby("line_num"):
+        row = linha.sort_values("left")["text"].tolist()
         if row:
             tabela.append(row)
             max_cols = max(max_cols, len(row))
 
-    tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
-
-    if tabela_pad:
-        df = pd.DataFrame(tabela_pad)
-        df = garantir_colunas_unicas(df)
+    if tabela:
+        tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
+        df = normalizar_colunas(pd.DataFrame(tabela_pad))
         logs.append("OCR simples aplicado")
         return df, logs
 
     return None, logs
 
+
 # =========================
-# PIPELINE
+# PIPELINE PRINCIPAL
 # =========================
+
 @st.cache_data(show_spinner=False)
-def processar_arquivo(bytes_file, tipo):
-    tabelas, logs = [], []
+def processar_arquivo(bytes_file: bytes, tipo: str) -> tuple[list[pd.DataFrame], list[str]]:
+    """
+    Extrai tabelas de PDF ou imagem.
+    Cacheado por conteúdo — não reprocessa o mesmo arquivo em reruns.
+    """
+    tabelas: list[pd.DataFrame] = []
+    logs: list[str] = []
 
     if "pdf" in tipo:
         tb, log_pdf = processar_pdf(bytes_file)
@@ -224,8 +231,7 @@ def processar_arquivo(bytes_file, tipo):
         logs.extend(log_pdf)
 
         if not tabelas:
-            logs.append("Fallback OCR com detecção de tabela")
-
+            logs.append("Nenhuma tabela via pdfplumber — iniciando fallback OCR")
             imagens = convert_from_bytes(bytes_file)
 
             for i, img in enumerate(imagens):
@@ -239,10 +245,8 @@ def processar_arquivo(bytes_file, tipo):
 
                 if df is not None:
                     tabelas.append(df)
-
     else:
         img = Image.open(io.BytesIO(bytes_file))
-
         df, log = extrair_tabela_super(img)
 
         if df is None:
@@ -256,27 +260,29 @@ def processar_arquivo(bytes_file, tipo):
 
     return tabelas, logs
 
+
 # =========================
 # EXCEL
 # =========================
-def gerar_excel(tabelas):
+
+def gerar_excel(tabelas: list[pd.DataFrame]) -> bytes:
     buffer = io.BytesIO()
 
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for i, df in enumerate(tabelas):
-            nome = f"Tabela_{i+1}"
-            nome = re.sub(r"[\\/*?:\[\]]", "", nome)[:31]
-            df = garantir_colunas_unicas(df)
+            nome = re.sub(r"[\\/*?:\[\]]", "", f"Tabela_{i+1}")[:31]
+            # normalizar_colunas já foi chamado no pipeline — não repete aqui
             df.to_excel(writer, index=False, sheet_name=nome)
 
-    buffer.seek(0)
-    return buffer.read()
+    return buffer.getvalue()  # FIX: era seek(0) + read() — getvalue() é mais direto e seguro
+
 
 # =========================
-# UI
+# UI PRINCIPAL
 # =========================
-st.title("📄 Extrator Inteligente")
-st.caption("Download em lote")
+
+st.title("📄 Extrator Inteligente PRO")
+st.caption("PDFs e imagens → Excel em lote")
 
 arquivos = st.file_uploader(
     "Envie PDFs ou imagens",
@@ -285,94 +291,119 @@ arquivos = st.file_uploader(
 )
 
 if arquivos:
-
     st.info(f"{len(arquivos)} arquivo(s) carregado(s)")
 
     if st.button("🚀 Iniciar processamento"):
-
         progresso = st.progress(0)
         status = st.empty()
-
         total = len(arquivos)
-        arquivos_excel = []
+
+        # Reseta resultados da sessão
+        st.session_state.resultados = []
 
         for i, arquivo in enumerate(arquivos):
-
             status.text(f"Processando {i+1}/{total} → {arquivo.name}")
 
             if arquivo.size > MAX_SIZE_MB * 1024 * 1024:
-                st.error(f"{arquivo.name} excede {MAX_SIZE_MB}MB")
+                st.error(f"❌ {arquivo.name} excede {MAX_SIZE_MB}MB")
+                progresso.progress((i + 1) / total)
                 continue
 
             try:
-                tabelas, logs = processar_arquivo(
-                    arquivo.getvalue(),
-                    arquivo.type
-                )
+                tabelas, logs = processar_arquivo(arquivo.getvalue(), arquivo.type)
             except Exception as e:
-                st.error(f"Erro em {arquivo.name}: {str(e)}")
+                st.error(f"❌ Erro em {arquivo.name}: {e}")
+                progresso.progress((i + 1) / total)
                 continue
 
             if tabelas:
                 excel = gerar_excel(tabelas)
-                arquivos_excel.append((arquivo.name, excel))
 
-                salvar_historico(arquivo.name, len(tabelas), excel)
+                # Guarda no session_state — os botões de download são renderizados
+                # fora do bloco do botão, evitando o sumiço em reruns
+                st.session_state.resultados.append({
+                    "nome": arquivo.name,
+                    "qtd": len(tabelas),
+                    "excel": excel,
+                    "tabelas": tabelas,
+                    "logs": logs,
+                })
 
-                st.download_button(
-                    f"⬇️ {arquivo.name}",
-                    data=excel,
-                    file_name=f"{arquivo.name}.xlsx"
-                )
+                # Também salva no histórico (limitado)
+                st.session_state.historico.append({
+                    "nome": arquivo.name,
+                    "data": datetime.now().strftime("%d/%m %H:%M"),
+                    "qtd": len(tabelas),
+                    "excel": excel,
+                })
+                st.session_state.historico = st.session_state.historico[-MAX_HISTORICO:]
 
-                with st.expander(f"📊 Preview - {arquivo.name}"):
-                    for df in tabelas:
-                        df = garantir_colunas_unicas(df)
-                        st.dataframe(df, use_container_width=True)
-
-                with st.expander(f"📜 Logs - {arquivo.name}"):
-                    for log in logs:
-                        st.text(log)
+            else:
+                st.warning(f"⚠️ {arquivo.name}: nenhuma tabela encontrada")
 
             progresso.progress((i + 1) / total)
-            time.sleep(0.3)
-
-        if arquivos_excel:
-            zip_buffer = io.BytesIO()
-
-            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                for nome, excel_bytes in arquivos_excel:
-                    nome_limpo = nome.split(".")[0]
-                    zf.writestr(f"{nome_limpo}.xlsx", excel_bytes)
-
-            zip_buffer.seek(0)
-
-            st.download_button(
-                "📦 Baixar TODOS (ZIP)",
-                data=zip_buffer,
-                file_name="tabelas_extraidas.zip"
-            )
+            # FIX: time.sleep(0.3) removido — não tinha propósito
 
         status.success("✅ Concluído!")
 
 # =========================
-# HISTÓRICO
+# RESULTADOS — renderizados fora do bloco do botão para não somírem
 # =========================
+
+if st.session_state.resultados:
+    st.markdown("## 📊 Resultados")
+
+    # Botão ZIP
+    if len(st.session_state.resultados) > 1:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            for r in st.session_state.resultados:
+                nome_limpo = r["nome"].rsplit(".", 1)[0]
+                zf.writestr(f"{nome_limpo}.xlsx", r["excel"])
+        st.download_button(
+            "📦 Baixar TODOS (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="tabelas_extraidas.zip"
+        )
+
+    for item in st.session_state.resultados:
+        st.markdown(f"**📄 {item['nome']}** — {item['qtd']} tabela(s)")
+
+        st.download_button(
+            f"⬇️ Baixar Excel — {item['nome']}",
+            data=item["excel"],
+            file_name=f"{item['nome'].rsplit('.', 1)[0]}.xlsx",
+            key=f"dl_{item['nome']}"
+        )
+
+        with st.expander(f"🔍 Preview — {item['nome']}"):
+            for df in item["tabelas"]:
+                st.dataframe(df, use_container_width=True)
+
+        with st.expander(f"📜 Logs — {item['nome']}"):
+            for log in item["logs"]:
+                st.text(log)
+
+        st.divider()
+
+# =========================
+# HISTÓRICO — session_state em vez de arquivo JSON no disco
+# =========================
+
 st.markdown("## 📜 Histórico")
 
-historico = carregar_historico()
-
-if historico:
-    for item in historico[::-1]:
-        st.markdown(f"### 📄 {item['arquivo']}")
-        st.caption(f"{item['data']} • {item['qtd_tabelas']} tabelas")
-
-        excel_bytes = base64.b64decode(item["excel"])
+if st.session_state.historico:
+    for item in reversed(st.session_state.historico):
+        st.markdown(f"**📄 {item['nome']}**")
+        st.caption(f"{item['data']} • {item['qtd']} tabelas")
 
         st.download_button(
             "⬇️ Baixar novamente",
-            data=excel_bytes,
-            file_name=f"{item['arquivo']}.xlsx"
+            data=item["excel"],
+            file_name=f"{item['nome'].rsplit('.', 1)[0]}.xlsx",
+            key=f"hist_{item['nome']}_{item['data']}"
         )
+
+        st.divider()
 else:
     st.info("Nenhum histórico ainda.")
