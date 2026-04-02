@@ -281,7 +281,7 @@ def gerar_excel(tabelas: list[pd.DataFrame]) -> bytes:
 # UI PRINCIPAL
 # =========================
 
-st.title("📄 Extrator Inteligente PRO")
+st.title("📄 Extrator Inteligente")
 st.caption("PDFs e imagens → Excel em lote")
 
 arquivos = st.file_uploader(
