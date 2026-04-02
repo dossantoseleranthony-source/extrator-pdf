@@ -373,3 +373,17 @@ if st.session_state.resultados:
                 st.text(log)
 
         st.divider()
+# BOTÃO ZIP (baixar todos)
+if len(st.session_state.resultados) > 1:
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        for item in st.session_state.resultados:
+            nome_limpo = item["nome"].rsplit(".", 1)[0]
+            zf.writestr(f"{nome_limpo}.xlsx", item["excel"])
+
+    st.download_button(
+        "📦 Baixar TODOS (ZIP)",
+        data=zip_buffer.getvalue(),
+        file_name="tabelas_extraidas.zip"
+    )
