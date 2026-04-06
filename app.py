@@ -20,7 +20,7 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 MAX_SIZE_MB = 50
 MAX_HISTORICO = 5  # usado no histórico abaixo
 
-st.set_page_config(page_title="Extrator Inteligente", layout="wide")
+st.set_page_config(page_title="Extrator de Tabela Inteligente", layout="wide")
 
 # =========================
 # CSS — escopado por classe customizada para não vazar em outros botões
@@ -294,7 +294,7 @@ def gerar_excel(tabelas: list[pd.DataFrame], nome_base: str) -> bytes:
 # UI PRINCIPAL
 # =========================
 
-st.title("📄 Extrator Inteligente")
+st.title("📄 Extrator de Tabela Inteligente")
 st.caption("PDFs e imagens → Excel automaticamente")
 
 arquivos = st.file_uploader(
