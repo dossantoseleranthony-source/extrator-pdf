@@ -6,50 +6,44 @@ import re
 import zipfile
 from datetime import datetime
 
-import pytesseract
 import cv2
 import numpy as np
 from PIL import Image
 from pdf2image import convert_from_bytes
 
+from paddleocr import PaddleOCR
+
 # =========================
 # CONFIG
 # =========================
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-
 MAX_SIZE_MB = 50
-MAX_HISTORICO = 5  # usado no histórico abaixo
+MAX_HISTORICO = 5
 
-st.set_page_config(page_title="Extrator de Tabela Inteligente", layout="wide")
+st.set_page_config(page_title="Extrator Inteligente", layout="wide")
 
 # =========================
-# CSS — escopado por classe customizada para não vazar em outros botões
+# OCR (Paddle)
+# =========================
+@st.cache_resource
+def get_ocr():
+    return PaddleOCR(use_angle_cls=True, lang='pt')
+
+ocr = get_ocr()
+
+# =========================
+# CSS
 # =========================
 st.markdown("""
 <style>
-/* Botão principal de ação */
 div[data-testid="stButton"] > button {
     background-color: #4CAF50;
     color: white;
     border-radius: 8px;
-    border: none;
-    font-weight: bold;
-    transition: opacity 0.2s;
 }
-div[data-testid="stButton"] > button:hover {
-    opacity: 0.85;
-}
-
-/* Botões de download */
 div[data-testid="stDownloadButton"] > button {
     background-color: #008CBA;
     color: white;
     border-radius: 8px;
-    border: none;
-    transition: opacity 0.2s;
-}
-div[data-testid="stDownloadButton"] > button:hover {
-    opacity: 0.85;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -66,11 +60,9 @@ if "resultados" not in st.session_state:
 # =========================
 # LIMPEZA
 # =========================
-
-def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
-    """Limpa nomes de colunas e garante unicidade com contador por nome."""
-    seen: dict[str, int] = {}
-    novas: list[str] = []
+def normalizar_colunas(df):
+    seen = {}
+    novas = []
 
     for i, col in enumerate(df.columns):
         nome = str(col).strip().replace("\n", " ")
@@ -85,38 +77,40 @@ def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def limpar_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove linhas/colunas vazias, preenche NaN e filtra linhas de paginação."""
+def limpar_df(df):
     df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
     df = df.fillna("")
+
     mascara_pag = df.apply(
         lambda row: row.astype(str).str.contains(r"\bpág", case=False).any(), axis=1
     )
-    return df[~mascara_pag].reset_index(drop=True)
 
+    return df[~mascara_pag].reset_index(drop=True)
 
 # =========================
 # PDF
 # =========================
-
-def processar_pdf(pdf_bytes: bytes) -> tuple[list[pd.DataFrame], list[str]]:
-    tabelas: list[pd.DataFrame] = []
-    logs: list[str] = []
+def processar_pdf(pdf_bytes):
+    tabelas = []
+    logs = []
 
     config_linhas = {
         "vertical_strategy": "lines",
         "horizontal_strategy": "lines",
         "intersection_y_tolerance": 15,
     }
+
     config_texto = {"vertical_strategy": "text", "horizontal_strategy": "text"}
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, pagina in enumerate(pdf.pages):
+
             tb = pagina.extract_tables(config_linhas) or pagina.extract_tables(config_texto) or []
             logs.append(f"Página {i+1}: {len(tb)} tabela(s) encontrada(s)")
 
             for tabela in tb:
                 df = pd.DataFrame(tabela)
+
                 if df.empty or df.shape[1] <= 1:
                     continue
 
@@ -134,16 +128,14 @@ def processar_pdf(pdf_bytes: bytes) -> tuple[list[pd.DataFrame], list[str]]:
 
     return tabelas, logs
 
-
 # =========================
-# OCR AVANÇADO (OpenCV + Tesseract)
+# OCR AVANÇADO (PaddleOCR)
 # =========================
-
-def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
-    logs: list[str] = []
+def extrair_tabela_super(img):
+    logs = []
 
     img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)  # PIL é RGB — não BGR
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
 
     thresh = cv2.adaptiveThreshold(
         gray, 255,
@@ -163,15 +155,15 @@ def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[st
     contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     boxes = sorted([cv2.boundingRect(c) for c in contours], key=lambda b: (b[1], b[0]))
 
-    rows: list[list] = []
-    current_row: list = []
+    rows = []
+    current_row = []
     last_y = -1
 
     for (x, y, w, h) in boxes:
         if last_y == -1:
             last_y = y
 
-        threshold = h * 0.5  # threshold dinâmico — adapta ao tamanho da célula
+        threshold = h * 0.5
 
         if abs(y - last_y) > threshold:
             if current_row:
@@ -184,68 +176,39 @@ def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[st
     if current_row:
         rows.append(current_row)
 
-    tabela: list[list[str]] = []
+    tabela = []
 
     for row in rows:
         row_sorted = sorted(row, key=lambda b: b[0])
-        linha: list[str] = []
+        linha = []
+
         for (x, y, w, h) in row_sorted:
             cell = img_cv[y:y+h, x:x+w]
-            text = pytesseract.image_to_string(cell, config="--oem 3 --psm 6 -l por")
+
+            result = ocr.ocr(cell, cls=True)
+
+            text = ""
+            if result and result[0]:
+                text = " ".join([line[1][0] for line in result[0]])
+
             linha.append(text.strip())
+
         tabela.append(linha)
 
     if tabela:
         df = normalizar_colunas(pd.DataFrame(tabela))
-        logs.append("Tabela detectada via OpenCV + OCR")
+        logs.append("Tabela detectada via PaddleOCR")
         return df, logs
 
     return None, logs
 
-
 # =========================
-# OCR SIMPLES (fallback)
+# PIPELINE
 # =========================
-
-def extrair_tabela_ocr(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
-    logs: list[str] = []
-
-    img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
-
-    data = (
-        pytesseract
-        .image_to_data(gray, output_type=pytesseract.Output.DATAFRAME)
-        .dropna()
-    )
-
-    tabela: list[list[str]] = []
-    max_cols = 0
-
-    for _, linha in data.groupby("line_num"):
-        row = linha.sort_values("left")["text"].tolist()
-        if row:
-            tabela.append(row)
-            max_cols = max(max_cols, len(row))
-
-    if tabela:
-        tabela_pad = [r + [""] * (max_cols - len(r)) for r in tabela]
-        df = normalizar_colunas(pd.DataFrame(tabela_pad))
-        logs.append("OCR simples aplicado")
-        return df, logs
-
-    return None, logs
-
-
-# =========================
-# PIPELINE PRINCIPAL
-# =========================
-
 @st.cache_data(show_spinner=False)
-def processar_arquivo(bytes_file: bytes, tipo: str) -> tuple[list[pd.DataFrame], list[str]]:
-    """Extrai tabelas de PDF ou imagem. Cacheado por conteúdo do arquivo."""
-    tabelas: list[pd.DataFrame] = []
-    logs: list[str] = []
+def processar_arquivo(bytes_file, tipo):
+    tabelas = []
+    logs = []
 
     if "pdf" in tipo:
         tb, log_pdf = processar_pdf(bytes_file)
@@ -254,47 +217,45 @@ def processar_arquivo(bytes_file: bytes, tipo: str) -> tuple[list[pd.DataFrame],
 
         if not tabelas:
             logs.append("Nenhuma tabela encontrada — iniciando OCR")
+
             imagens = convert_from_bytes(bytes_file)
 
             for i, img in enumerate(imagens):
                 df, log = extrair_tabela_super(img)
-                if df is None:
-                    df, log2 = extrair_tabela_ocr(img)
-                    log.extend(log2)
+
                 logs.extend([f"Página {i+1}: {l}" for l in log])
+
                 if df is not None:
                     tabelas.append(df)
+
     else:
-        img = Image.open(io.BytesIO(bytes_file))
+        img = Image.open(io.BytesIO(bytes_file)).convert("RGB")
+
         df, log = extrair_tabela_super(img)
-        if df is None:
-            df, log2 = extrair_tabela_ocr(img)
-            log.extend(log2)
         logs.extend(log)
+
         if df is not None:
             tabelas.append(df)
 
     return tabelas, logs
 
-
 # =========================
 # EXCEL
 # =========================
-
-def gerar_excel(tabelas: list[pd.DataFrame], nome_base: str) -> bytes:
+def gerar_excel(tabelas, nome_base):
     buffer = io.BytesIO()
+
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for i, df in enumerate(tabelas):
             nome = re.sub(r"[\\/*?:\[\]]", "", f"{nome_base[:15]}_Tb{i+1}")[:31]
             df.to_excel(writer, index=False, sheet_name=nome)
+
     return buffer.getvalue()
 
-
 # =========================
-# UI PRINCIPAL
+# UI
 # =========================
-
-st.title("📄 Extrator de Tabela Inteligente")
+st.title("📄 Extrator Inteligente (com IA)")
 st.caption("PDFs e imagens → Excel automaticamente")
 
 arquivos = st.file_uploader(
@@ -309,27 +270,30 @@ if arquivos:
     if st.button("🚀 Processar"):
         progresso = st.progress(0)
         status = st.empty()
-        total = len(arquivos)
 
+        total = len(arquivos)
         st.session_state.resultados = []
 
         for i, arquivo in enumerate(arquivos):
+
             status.text(f"🔍 Processando {arquivo.name}")
 
             if arquivo.size > MAX_SIZE_MB * 1024 * 1024:
                 st.error(f"{arquivo.name} excede o limite de {MAX_SIZE_MB}MB")
-                progresso.progress((i + 1) / total)
                 continue
 
             try:
-                tabelas, logs = processar_arquivo(arquivo.getvalue(), arquivo.type)
-            except Exception as e:
-                st.error(f"Erro em {arquivo.name}: {e}")
-                progresso.progress((i + 1) / total)
+                tabelas, logs = processar_arquivo(
+                    arquivo.getvalue(),
+                    arquivo.type
+                )
+            except Exception:
+                st.error(f"Erro ao processar {arquivo.name}")
                 continue
 
             if tabelas:
                 status.text("📊 Gerando Excel...")
+
                 excel = gerar_excel(tabelas, arquivo.name)
 
                 st.session_state.resultados.append({
@@ -338,17 +302,7 @@ if arquivos:
                     "excel": excel,
                     "tabelas": tabelas,
                     "logs": logs,
-                    "data": datetime.now().strftime("%d/%m %H:%M"),
                 })
-
-                # Histórico limitado a MAX_HISTORICO entradas
-                st.session_state.historico.append({
-                    "nome": arquivo.name,
-                    "data": datetime.now().strftime("%d/%m %H:%M"),
-                    "qtd": len(tabelas),
-                    "excel": excel,
-                })
-                st.session_state.historico = st.session_state.historico[-MAX_HISTORICO:]
 
             else:
                 st.warning(f"{arquivo.name}: nenhuma tabela encontrada")
@@ -358,18 +312,16 @@ if arquivos:
         status.success("✅ Finalizado!")
 
 # =========================
-# RESULTADOS — fora do bloco if st.button para não somírem em reruns
+# RESULTADOS
 # =========================
-
 if st.session_state.resultados:
     st.markdown("## 📊 Resultados")
 
-    # FIX: ZIP dentro do bloco de resultados, com key única
     if len(st.session_state.resultados) > 1:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for item in st.session_state.resultados:
-                nome_limpo = item["nome"].rsplit(".", 1)[0]  # FIX: rsplit para nomes com pontos
+                nome_limpo = item["nome"].rsplit(".", 1)[0]
                 zf.writestr(f"{nome_limpo}.xlsx", item["excel"])
 
         st.download_button(
@@ -385,36 +337,16 @@ if st.session_state.resultados:
         st.download_button(
             "⬇️ Baixar Excel",
             data=item["excel"],
-            file_name=f"{item['nome'].rsplit('.', 1)[0]}.xlsx",  # FIX: rsplit
-            key=f"dl_{i}_{item['nome']}"  # FIX: key única por item — evita DuplicateWidgetID
+            file_name=f"{item['nome'].rsplit('.', 1)[0]}.xlsx",
+            key=f"dl_{i}"
         )
 
         with st.expander("Preview"):
             for df in item["tabelas"]:
-                st.dataframe(df, use_container_width=True)  # FIX: restaurado use_container_width
+                st.dataframe(df, use_container_width=True)
 
         with st.expander("Logs"):
             for log in item["logs"]:
                 st.text(log)
-
-        st.divider()
-
-# =========================
-# HISTÓRICO
-# =========================
-
-if st.session_state.historico:
-    st.markdown("## 📜 Histórico")
-
-    for i, item in enumerate(reversed(st.session_state.historico)):
-        st.markdown(f"**📄 {item['nome']}**")
-        st.caption(f"{item['data']} • {item['qtd']} tabelas")
-
-        st.download_button(
-            "⬇️ Baixar novamente",
-            data=item["excel"],
-            file_name=f"{item['nome'].rsplit('.', 1)[0]}.xlsx",
-            key=f"hist_{i}_{item['nome']}"  # key única no histórico também
-        )
 
         st.divider()
