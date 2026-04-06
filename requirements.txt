@@ -1,9 +1,10 @@
 streamlit
 pdfplumber
 pandas
-pytesseract
-opencv-python-headless
-pillow
+numpy
+Pillow
 pdf2image
 openpyxl
-numpy
+opencv-python-headless
+paddleocr
+paddlepaddle
