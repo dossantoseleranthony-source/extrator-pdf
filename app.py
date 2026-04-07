@@ -4,7 +4,6 @@ import pandas as pd
 import io
 import re
 import zipfile
-import shutil
 from datetime import datetime
 
 import pytesseract
@@ -16,24 +15,7 @@ from pdf2image import convert_from_bytes
 # =========================
 # CONFIG
 # =========================
-def configurar_tesseract() -> str | None:
-    """
-    Resolve o binário do Tesseract de forma portátil para Streamlit Cloud,
-    Linux local e ambientes customizados.
-    """
-    candidatos = [
-        shutil.which("tesseract"),
-        "/usr/bin/tesseract",
-        "/usr/local/bin/tesseract",
-    ]
-    for cmd in candidatos:
-        if cmd:
-            pytesseract.pytesseract.tesseract_cmd = cmd
-            return cmd
-    return None
-
-
-TESSERACT_CMD = configurar_tesseract()
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 MAX_SIZE_MB = 50
 MAX_HISTORICO = 5  # usado no histórico abaixo
@@ -110,46 +92,7 @@ def limpar_df(df: pd.DataFrame) -> pd.DataFrame:
     mascara_pag = df.apply(
         lambda row: row.astype(str).str.contains(r"\bpág", case=False).any(), axis=1
     )
-    df = df[~mascara_pag].reset_index(drop=True)
-
-    # Remove linhas muito "poluídas" por marca d'água (baixa densidade de caracteres úteis)
-    def linha_com_texto_util(row: pd.Series) -> bool:
-        valores = " ".join(row.astype(str).tolist()).strip()
-        if not valores:
-            return False
-        chars_uteis = len(re.findall(r"[A-Za-zÀ-ÿ0-9]", valores))
-        return chars_uteis >= max(3, int(len(valores) * 0.15))
-
-    mascara_util = df.apply(linha_com_texto_util, axis=1)
-    return df[mascara_util].reset_index(drop=True)
-
-
-def preprocessar_para_ocr(img_cv: np.ndarray) -> np.ndarray:
-    """
-    Pré-processa imagem para reduzir impacto de marca d'água e melhorar OCR.
-    Estratégia:
-    - normalização de contraste local (CLAHE)
-    - remoção de fundo com abertura morfológica
-    - binarização adaptativa
-    """
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
-    gray = cv2.fastNlMeansDenoising(gray, h=12)
-
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    contraste = clahe.apply(gray)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    fundo = cv2.morphologyEx(contraste, cv2.MORPH_OPEN, kernel)
-    sem_fundo = cv2.divide(contraste, fundo, scale=255)
-
-    return cv2.adaptiveThreshold(
-        sem_fundo,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        35,
-        11,
-    )
+    return df[~mascara_pag].reset_index(drop=True)
 
 
 # =========================
@@ -200,8 +143,14 @@ def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[st
     logs: list[str] = []
 
     img_cv = np.array(img)
-    ocr_ready = preprocessar_para_ocr(img_cv)
-    thresh = cv2.bitwise_not(ocr_ready)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)  # PIL é RGB — não BGR
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        15, 4
+    )
 
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
     horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
@@ -241,7 +190,7 @@ def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[st
         row_sorted = sorted(row, key=lambda b: b[0])
         linha: list[str] = []
         for (x, y, w, h) in row_sorted:
-            cell = ocr_ready[y:y+h, x:x+w]
+            cell = img_cv[y:y+h, x:x+w]
             text = pytesseract.image_to_string(cell, config="--oem 3 --psm 6 -l por")
             linha.append(text.strip())
         tabela.append(linha)
@@ -262,7 +211,7 @@ def extrair_tabela_ocr(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]
     logs: list[str] = []
 
     img_cv = np.array(img)
-    gray = preprocessar_para_ocr(img_cv)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
 
     data = (
         pytesseract
@@ -305,7 +254,7 @@ def processar_arquivo(bytes_file: bytes, tipo: str) -> tuple[list[pd.DataFrame],
 
         if not tabelas:
             logs.append("Nenhuma tabela encontrada — iniciando OCR")
-            imagens = convert_from_bytes(bytes_file, dpi=300)
+            imagens = convert_from_bytes(bytes_file)
 
             for i, img in enumerate(imagens):
                 df, log = extrair_tabela_super(img)
@@ -347,11 +296,6 @@ def gerar_excel(tabelas: list[pd.DataFrame], nome_base: str) -> bytes:
 
 st.title("📄 Extrator de Tabela Inteligente")
 st.caption("PDFs e imagens → Excel automaticamente")
-if not TESSERACT_CMD:
-    st.error(
-        "Tesseract não encontrado no ambiente. No Streamlit Cloud, verifique o packages.txt "
-        "com o pacote `tesseract-ocr`."
-    )
 
 arquivos = st.file_uploader(
     "Envie arquivos",
