@@ -4,6 +4,7 @@ import pandas as pd
 import io
 import re
 import zipfile
+import shutil
 from datetime import datetime
 
 import pytesseract
@@ -15,7 +16,9 @@ from pdf2image import convert_from_bytes
 # =========================
 # CONFIG
 # =========================
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+tesseract_path = shutil.which("tesseract")
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 MAX_SIZE_MB = 50
 MAX_HISTORICO = 5  # usado no histórico abaixo
@@ -139,11 +142,26 @@ def processar_pdf(pdf_bytes: bytes) -> tuple[list[pd.DataFrame], list[str]]:
 # OCR AVANÇADO (OpenCV + Tesseract)
 # =========================
 
+def pre_processar_para_tabela(img: Image.Image) -> np.ndarray:
+    """Reduz ruído/marca d'água e destaca linhas/texto para OCR."""
+    img_cv = np.array(img.convert("RGB"))
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+
+    # Remove fundos suaves (como marca d'água clara) preservando bordas/texto.
+    bg = cv2.medianBlur(gray, 41)
+    sem_fundo = cv2.absdiff(gray, bg)
+    sem_fundo = cv2.normalize(sem_fundo, None, 0, 255, cv2.NORM_MINMAX)
+
+    # Realce local para páginas escaneadas.
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    realce = clahe.apply(sem_fundo)
+    return realce
+
 def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
     logs: list[str] = []
 
-    img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)  # PIL é RGB — não BGR
+    img_cv = np.array(img.convert("RGB"))
+    gray = pre_processar_para_tabela(img)
 
     thresh = cv2.adaptiveThreshold(
         gray, 255,
@@ -210,12 +228,11 @@ def extrair_tabela_super(img: Image.Image) -> tuple[pd.DataFrame | None, list[st
 def extrair_tabela_ocr(img: Image.Image) -> tuple[pd.DataFrame | None, list[str]]:
     logs: list[str] = []
 
-    img_cv = np.array(img)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+    gray = pre_processar_para_tabela(img)
 
     data = (
         pytesseract
-        .image_to_data(gray, output_type=pytesseract.Output.DATAFRAME)
+        .image_to_data(gray, output_type=pytesseract.Output.DATAFRAME, config="--oem 3 --psm 6 -l por")
         .dropna()
     )
 
@@ -254,7 +271,13 @@ def processar_arquivo(bytes_file: bytes, tipo: str) -> tuple[list[pd.DataFrame],
 
         if not tabelas:
             logs.append("Nenhuma tabela encontrada — iniciando OCR")
-            imagens = convert_from_bytes(bytes_file)
+            imagens = convert_from_bytes(
+                bytes_file,
+                dpi=300,
+                grayscale=False,
+                thread_count=2,
+                fmt="png",
+            )
 
             for i, img in enumerate(imagens):
                 df, log = extrair_tabela_super(img)
@@ -296,6 +319,12 @@ def gerar_excel(tabelas: list[pd.DataFrame], nome_base: str) -> bytes:
 
 st.title("📄 Extrator de Tabela Inteligente")
 st.caption("PDFs e imagens → Excel automaticamente")
+
+if not tesseract_path:
+    st.warning(
+        "Tesseract não encontrado no ambiente. A extração por OCR pode falhar. "
+        "No Streamlit Cloud, confirme `packages.txt` com `tesseract-ocr` e `poppler-utils`."
+    )
 
 arquivos = st.file_uploader(
     "Envie arquivos",
