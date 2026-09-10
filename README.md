@@ -1,23 +1,60 @@
-Extrator PDF (Streamlit)
-Uma aplicação web desenvolvida em Python com Streamlit projetada para extrair e processar dados de arquivos PDF de forma prática e automatizada.
+# Extrator PDF 📄
 
-🚀 O que o app faz?
-O aplicativo serve como uma interface web simples e intuitiva para manipulação e extração de informações de documentos em formato PDF, facilitando tarefas que exigem a leitura automatizada de dados contidos nesses arquivos.
+Uma aplicação web desenvolvida em **Python** e **Streamlit** projetada para extrair, processar e analisar dados de arquivos PDF de forma prática, rápida e automatizada.
 
-⚙️ Como ele funciona?
-A aplicação roda sobre o ecossistema Python/Streamlit e utiliza ferramentas robustas de processamento de texto e documentos a nível de sistema operacional:
+---
 
-Interface Web (Streamlit): Permite o upload de arquivos PDF de forma amigável através do navegador, com suporte configurado para arquivos maiores (limite ajustado nas configurações do servidor).
+## 🚀 O que o aplicativo faz?
+O **Extrator PDF** serve como uma ferramenta centralizada para o tratamento de documentos em formato PDF. Ele automatiza o fluxo de leitura de arquivos, permitindo extrair textos e conteúdos que muitas vezes exigem processos manuais complexos, facilitando o dia a dia em tarefas de auditoria, leitura de relatórios ou extração de dados estruturados.
 
-Processamento de OCR e Documentos (Tesseract OCR & Poppler): O ambiente conta com pacotes nativos essenciais (tesseract-ocr e poppler-utils) para garantir a capacidade de leitura, conversão e extração de texto, inclusive de PDFs digitalizados ou imagens (via OCR).
+---
 
-Ambiente Padronizado (Devcontainer): O projeto inclui suporte a Devcontainers, o que facilita a configuração rápida de um ambiente de desenvolvimento isolado com todas as dependências do sistema já instaladas.
+## ⚙️ Como ele funciona?
+A aplicação combina uma interface web amigável com poderosas bibliotecas e utilitários de sistema para o processamento de documentos:
 
-🛠️ Tecnologias e Dependências
-Python
+1. **Interface Web Interativa (`Streamlit`):** Permite que o usuário faça o upload de arquivos PDF diretamente pelo navegador de forma simples e intuitiva, com suporte configurado para arquivos maiores.
+2. **Processamento Avançado e OCR (`Tesseract & Poppler`):** Nos bastidores, a aplicação utiliza ferramentas robustas de manipulação de PDF e OCR (Reconhecimento Óptico de Caracteres) através do *Poppler-utils* e *Tesseract-ocr*, garantindo a leitura tanto de PDFs nativos quanto de documentos digitalizados (imagens).
+3. **Ambiente Padronizado (`Devcontainer`):** O projeto conta com suporte a *Devcontainers*, permitindo configurar o ambiente de desenvolvimento completo de forma isolada com todas as dependências do sistema já prontas para uso.
 
-Streamlit
+---
 
-Tesseract OCR
+## 🛠️ Tecnologias Utilizadas
 
-Poppler Utils
+* **[Python](https://www.python.org/)** — Linguagem principal de programação
+* **[Streamlit](https://streamlit.io/)** — Framework para construção da interface web
+* **[Tesseract OCR](https://github.com/tesseract-ocr/tesseract)** — Motor de reconhecimento óptico de caracteres
+* **[Poppler Utils](https://poppler.freedesktop.org/)** — Utilitários para renderização e manipulação de arquivos PDF
+
+---
+
+## 📦 Instalação e Execução Local
+
+Se você deseja rodar o projeto localmente, siga os passos abaixo:
+
+1. **Clone o repositório:**
+   ```bash
+   git clone https://github.com/SEU-USUARIO/SEU-REPOSITORIO.git
+   cd SEU-REPOSITORIO
+   ```
+
+2. **Instale as dependências do sistema (necessárias para OCR e manipulação de PDF):**
+   * *No Ubuntu/Debian:*
+     ```bash
+     sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+     ```
+
+3. **Instale as dependências do Python:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Inicie a aplicação Streamlit:**
+   ```bash
+   streamlit run app.py
+   ```
+
+---
+
+## 👤 Autor
+
+Desenvolvido por **Anthony**.
